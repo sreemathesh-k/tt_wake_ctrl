@@ -60,16 +60,24 @@ async def test_or_mode_wake_on_ch0(dut):
 
     set_ui(dut, 0b0001, 0b1111)
     set_uio(dut, 0, 0)
-    await ClockCycles(dut.clk, 60)
 
+    # evt_flags/priority_ch are only held valid for the duration of the
+    # wake pulse (PW=4 -> 16 cycles) after the debounce window (~10
+    # cycles); the FSM clears evt_flags back to 0 once the pulse ends so
+    # it won't re-fire without a fresh edge. Sample them promptly, while
+    # the pulse is still active, rather than after it has already ended.
+    await ClockCycles(dut.clk, 20)
     status = await read_reg(dut, 0)
     priority_ch = (status >> 4) & 0x7
     evt_flags = status & 0xF
+    assert evt_flags == 0b0001, f"expected evt_flags==0b0001, got {evt_flags:04b}"
+    assert priority_ch == 0
 
+    # wake_count is a persistent saturating counter, so it's safe to check
+    # well after the pulse has fully completed.
+    await ClockCycles(dut.clk, 40)
     wake_count = (await read_reg(dut, 1)) | ((await read_reg(dut, 2)) << 8)
     assert wake_count == 1, f"expected wake_count==1, got {wake_count}"
-    assert evt_flags == 0b0001
-    assert priority_ch == 0
 
     set_ui(dut, 0, 0b1111)
     await ClockCycles(dut.clk, 20)
