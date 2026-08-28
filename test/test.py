@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotb.triggers import ClockCycles, Timer
 
 
 def set_ui(dut, thresh_in, ch_en):
@@ -22,8 +22,14 @@ async def reset(dut):
     await ClockCycles(dut.clk, 1)
 
 
-def read_reg(dut, reg_sel):
+async def read_reg(dut, reg_sel):
+    # out_mux in the DUT is purely combinational (always @(*)), so after
+    # changing reg_sel we must yield back to the simulator (any await) to
+    # let it re-evaluate before uo_out reflects the new selection. Without
+    # this, uo_out still holds the *previous* reg_sel's value -- this was
+    # the actual cause of every failing test, not the RTL.
     set_uio(dut, dut.uio_in.value & 1, reg_sel)
+    await Timer(1, units="ns")
     return int(dut.uo_out.value)
 
 
@@ -32,7 +38,7 @@ async def test_reset(dut):
     cocotb.start_soon(Clock(dut.clk, 20, units="ns").start())
     await reset(dut)
 
-    status = read_reg(dut, 0)
+    status = await read_reg(dut, 0)
     wake_out = (status >> 7) & 1
     priority_ch = (status >> 4) & 0x7
     evt_flags = status & 0xF
@@ -41,8 +47,8 @@ async def test_reset(dut):
     assert priority_ch == 0x7
     assert evt_flags == 0
 
-    wake_count = read_reg(dut, 1) | (read_reg(dut, 2) << 8)
-    false_wake_cnt = read_reg(dut, 3) | (read_reg(dut, 4) << 8)
+    wake_count = (await read_reg(dut, 1)) | ((await read_reg(dut, 2)) << 8)
+    false_wake_cnt = (await read_reg(dut, 3)) | ((await read_reg(dut, 4)) << 8)
     assert wake_count == 0
     assert false_wake_cnt == 0
 
@@ -56,11 +62,11 @@ async def test_or_mode_wake_on_ch0(dut):
     set_uio(dut, 0, 0)
     await ClockCycles(dut.clk, 60)
 
-    status = read_reg(dut, 0)
+    status = await read_reg(dut, 0)
     priority_ch = (status >> 4) & 0x7
     evt_flags = status & 0xF
 
-    wake_count = read_reg(dut, 1) | (read_reg(dut, 2) << 8)
+    wake_count = (await read_reg(dut, 1)) | ((await read_reg(dut, 2)) << 8)
     assert wake_count == 1, f"expected wake_count==1, got {wake_count}"
     assert evt_flags == 0b0001
     assert priority_ch == 0
@@ -79,7 +85,7 @@ async def test_glitch_is_rejected(dut):
     set_ui(dut, 0, 0b1111)
     await ClockCycles(dut.clk, 10)
 
-    wake_count = read_reg(dut, 1) | (read_reg(dut, 2) << 8)
+    wake_count = (await read_reg(dut, 1)) | ((await read_reg(dut, 2)) << 8)
     assert wake_count == 0
 
 
@@ -92,8 +98,8 @@ async def test_and_mode_partial_assertion_false_wake(dut):
     set_uio(dut, 1, 0)
     await ClockCycles(dut.clk, 100)
 
-    wake_count = read_reg(dut, 1) | (read_reg(dut, 2) << 8)
-    false_wake_cnt = read_reg(dut, 3) | (read_reg(dut, 4) << 8)
+    wake_count = (await read_reg(dut, 1)) | ((await read_reg(dut, 2)) << 8)
+    false_wake_cnt = (await read_reg(dut, 3)) | ((await read_reg(dut, 4)) << 8)
 
     assert wake_count == 0
     assert false_wake_cnt == 1
@@ -112,8 +118,8 @@ async def test_and_mode_full_assertion_wakes_once(dut):
     set_uio(dut, 1, 0)
     await ClockCycles(dut.clk, 200)
 
-    wake_count = read_reg(dut, 1) | (read_reg(dut, 2) << 8)
-    false_wake_cnt = read_reg(dut, 3) | (read_reg(dut, 4) << 8)
+    wake_count = (await read_reg(dut, 1)) | ((await read_reg(dut, 2)) << 8)
+    false_wake_cnt = (await read_reg(dut, 3)) | ((await read_reg(dut, 4)) << 8)
 
     assert wake_count == 1
     assert false_wake_cnt == 0
