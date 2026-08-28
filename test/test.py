@@ -28,14 +28,14 @@ async def read_reg(dut, reg_sel):
     # let it re-evaluate before uo_out reflects the new selection. Without
     # this, uo_out still holds the *previous* reg_sel's value -- this was
     # the actual cause of every failing test, not the RTL.
-    set_uio(dut, dut.uio_in.value & 1, reg_sel)
+    set_uio(dut, int(dut.uio_in.value) & 1, reg_sel)
     await Timer(1, units="ns")
     return int(dut.uo_out.value)
 
 
 @cocotb.test()
 async def test_reset(dut):
-    cocotb.start_soon(Clock(dut.clk, 20, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     await reset(dut)
 
     status = await read_reg(dut, 0)
@@ -55,7 +55,7 @@ async def test_reset(dut):
 
 @cocotb.test()
 async def test_or_mode_wake_on_ch0(dut):
-    cocotb.start_soon(Clock(dut.clk, 20, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     await reset(dut)
 
     set_ui(dut, 0b0001, 0b1111)
@@ -77,7 +77,7 @@ async def test_or_mode_wake_on_ch0(dut):
 
 @cocotb.test()
 async def test_glitch_is_rejected(dut):
-    cocotb.start_soon(Clock(dut.clk, 20, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     await reset(dut)
 
     set_ui(dut, 0b0001, 0b1111)
@@ -91,7 +91,7 @@ async def test_glitch_is_rejected(dut):
 
 @cocotb.test()
 async def test_and_mode_partial_assertion_false_wake(dut):
-    cocotb.start_soon(Clock(dut.clk, 20, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     await reset(dut)
 
     set_ui(dut, 0b0001, 0b1111)
@@ -111,7 +111,7 @@ async def test_and_mode_partial_assertion_false_wake(dut):
 
 @cocotb.test()
 async def test_and_mode_full_assertion_wakes_once(dut):
-    cocotb.start_soon(Clock(dut.clk, 20, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     await reset(dut)
 
     set_ui(dut, 0b1111, 0b1111)
