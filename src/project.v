@@ -1,27 +1,18 @@
 `timescale 1ns / 1ps
 /*
- * ===========================================================================
- * wake_ctrl - Multi-channel debounced wake/event controller
- * ===========================================================================
- * 4-channel input controller with per-channel debounce, priority encoding,
- * and two wake modes:
- *   - OR mode  (mode_and=0): any enabled, debounced channel triggers a wake
- *   - AND mode (mode_and=1): a wake only fires once ALL enabled channels are
- *     simultaneously stable; a partial assertion that later drops out is
- *     logged as a "false wake" instead.
+ * wake_ctrl_enhanced - adds two read-only diagnostic features on top of the
+ * already-verified base design, using spare tile area rather than padding:
  *
- * This file also contains the TinyTapeout top-level wrapper
- * (tt_um_sreemathesh_k_wake_ctrl) that maps the design onto the fixed TT
- * pin budget:
- *   ui_in[7:0]  = 8 dedicated inputs
- *   uo_out[7:0] = 8 dedicated outputs
- *   uio[7:0]    = 8 bidirectional pins
+ *   1. Per-channel wake counters (ch0_wcnt..ch3_wcnt): how many times each
+ *      individual sensor channel has contributed to a genuine wake, so you
+ *      can tell which sensor is actually driving activity.
+ *   2. 8-entry event history log (hist_flat, hist_wptr): a circular buffer
+ *      recording which channel (by priority_ch) caused each of the last 8
+ *      wakes, so you can reconstruct "what happened" after the fact instead
+ *      of only seeing a live snapshot.
  *
- * wake_ctrl needs 9 input bits and 40 output bits, so the wide status/
- * counter registers (wake_count, false_wake_cnt, evt_flags, priority_ch,
- * wake_out) are exposed through a small byte-wide readback bus instead of
- * being wired out directly -- see the register map below.
- * ===========================================================================
+ * Both are purely additive: no change to thresh_in/ch_en/mode_and behavior,
+ * no new input pins required. All new ports are outputs, read-only.
  */
 
 module wake_ctrl #(
@@ -38,16 +29,18 @@ module wake_ctrl #(
     output reg  [N-1:0] evt_flags,
     output reg  [2:0]   priority_ch,
     output reg  [15:0]  wake_count,
-    output reg  [15:0]  false_wake_cnt
+    output reg  [15:0]  false_wake_cnt,
+
+    // -------- new diagnostic outputs (read-only, additive) --------
+    output reg  [15:0]  ch0_wcnt,
+    output reg  [15:0]  ch1_wcnt,
+    output reg  [15:0]  ch2_wcnt,
+    output reg  [15:0]  ch3_wcnt,
+    output reg  [23:0]  hist_flat,   // 8 entries x 3 bits, entry0 in bits[2:0]
+    output reg  [2:0]   hist_wptr    // next write slot (0-7, wraps)
 );
 
-    // Debounce counter width scales with DB so any legal DB value works
-    // correctly (previously hardcoded to 4 bits, which silently broke
-    // for DB > 16 -- caught by testing DB=20 directly).
     localparam DBW = (DB <= 1) ? 1 : $clog2(DB);
-    // Explicitly-sized compare constant so dbcnt[i] >= DB_M1 never mixes
-    // a DBW-bit reg with an implicit 32-bit integer literal (this was a
-    // silent width-mismatch warning source under some lint settings).
     localparam [DBW-1:0] DB_M1 = DB - 1;
 
     reg [N-1:0]   sync1, sync2;
@@ -94,17 +87,10 @@ module wake_ctrl #(
     endgenerate
 
     // Stage 3: Priority Encoder
-    // Rewritten to index individual bits directly instead of building a
-    // shifted 1-bit mask ((1'b1 << i)) and ANDing it against a 4-bit bus.
-    // The old form relies on implicit context-based width extension of a
-    // literal that is *explicitly* declared 1-bit (1'b1), which is legal
-    // per LRM but is exactly the pattern Vivado's elaboration linter warns
-    // about ("operand sizes are inconsistent" / width-mismatch). Direct
-    // bit-select comparisons are unambiguous and synthesize identically.
     wire [N-1:0] pri_active = stable & ch_en;
     reg  [2:0]   pri_next;
     always @* begin
-        pri_next = 3'd7; // none active
+        pri_next = 3'd7;
         if      (pri_active[0]) pri_next = 3'd0;
         else if (pri_active[1]) pri_next = 3'd1;
         else if (pri_active[2]) pri_next = 3'd2;
@@ -142,8 +128,6 @@ module wake_ctrl #(
                         firing    <= 1'b1;
                         evt_flags <= active_stable;
                     end else if (all_active) begin
-                        // condition still fully met but not a new edge:
-                        // already fired for this assertion, do nothing
                     end else if (new_edge) begin
                         if (!(&false_wake_cnt))
                             false_wake_cnt <= false_wake_cnt + 1'b1;
@@ -181,66 +165,120 @@ module wake_ctrl #(
         end
     end
 
-    // Stage 6: Wake Counter (saturating)
+    // Stage 6: Wake Counter (saturating) + rising-edge detect, shared by
+    // the aggregate counter and the new per-channel / history features
+    wire wake_rise = wake_out && !wake_out_d;
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             wake_out_d <= 1'b0;
             wake_count <= 16'd0;
         end else begin
             wake_out_d <= wake_out;
-            if (wake_out && !wake_out_d && !(&wake_count))
+            if (wake_rise && !(&wake_count))
                 wake_count <= wake_count + 1'b1;
         end
     end
 
+    // Stage 7 (new): Per-channel saturating wake counters. On each wake
+    // rising edge, every channel bit set in evt_flags at that instant gets
+    // its own counter incremented (evt_flags is still holding the latched
+    // cause of the wake at this point -- it only clears when the pulse ends).
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            ch0_wcnt <= 16'd0;
+            ch1_wcnt <= 16'd0;
+            ch2_wcnt <= 16'd0;
+            ch3_wcnt <= 16'd0;
+        end else if (wake_rise) begin
+            if (evt_flags[0] && !(&ch0_wcnt)) ch0_wcnt <= ch0_wcnt + 1'b1;
+            if (evt_flags[1] && !(&ch1_wcnt)) ch1_wcnt <= ch1_wcnt + 1'b1;
+            if (evt_flags[2] && !(&ch2_wcnt)) ch2_wcnt <= ch2_wcnt + 1'b1;
+            if (evt_flags[3] && !(&ch3_wcnt)) ch3_wcnt <= ch3_wcnt + 1'b1;
+        end
+    end
+
+    // Stage 8 (new): 8-entry circular event history log. Records
+    // priority_ch (the highest-priority contributing channel, or 7 if
+    // somehow none -- shouldn't happen on a real wake) at each wake event.
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            hist_flat <= 24'd0;
+            hist_wptr <= 3'd0;
+        end else if (wake_rise) begin
+            case (hist_wptr)
+                3'd0: hist_flat[2:0]   <= priority_ch;
+                3'd1: hist_flat[5:3]   <= priority_ch;
+                3'd2: hist_flat[8:6]   <= priority_ch;
+                3'd3: hist_flat[11:9]  <= priority_ch;
+                3'd4: hist_flat[14:12] <= priority_ch;
+                3'd5: hist_flat[17:15] <= priority_ch;
+                3'd6: hist_flat[20:18] <= priority_ch;
+                3'd7: hist_flat[23:21] <= priority_ch;
+            endcase
+            hist_wptr <= hist_wptr + 1'b1; // wraps naturally, 3'd7+1=3'd0
+        end
+    end
+
 endmodule
-
-
 /*
  * ===========================================================================
- * tt_um_sreemathesh_k_wake_ctrl - TinyTapeout top-level wrapper
+ * tt_um_wake_ctrl - TinyTapeout top-level wrapper (enhanced)
  * ===========================================================================
- * Pinout:
- *   ui_in[3:0]  = thresh_in[3:0]
- *   ui_in[7:4]  = ch_en[3:0]
- *   uio_in[0]   = mode_and
- *   uio_in[3:1] = reg_sel[2:0]   (selects which byte appears on uo_out)
- *   uio_in[7:4] = unused
- *   uio_out     = all zero (uio only used as input here)
- *   uio_oe      = all zero (all uio pins configured as inputs)
+ * Pin mapping is UNCHANGED from the base design -- no existing behavior or
+ * pin meaning is altered. Only the reg_sel readback bus is widened (3->5
+ * bits) to expose the new diagnostic data, using uio_in bits that were
+ * previously unused.
  *
- *   reg_sel:
- *     0 -> {wake_out, priority_ch[2:0], evt_flags[3:0]}
- *     1 -> wake_count[7:0]
- *     2 -> wake_count[15:8]
- *     3 -> false_wake_cnt[7:0]
- *     4 -> false_wake_cnt[15:8]
- *     5-7 -> reads back 0x00
+ *   ui_in[3:0]  = thresh_in[3:0]        (unchanged)
+ *   ui_in[7:4]  = ch_en[3:0]            (unchanged)
+ *   uio_in[0]   = mode_and              (unchanged)
+ *   uio_in[5:1] = reg_sel[4:0]          (widened from 3 to 5 bits)
+ *   uio_in[7:6] = unused
+ *
+ *   reg_sel map:
+ *     0      -> {wake_out, priority_ch[2:0], evt_flags[3:0]}
+ *     1      -> wake_count[7:0]
+ *     2      -> wake_count[15:8]
+ *     3      -> false_wake_cnt[7:0]
+ *     4      -> false_wake_cnt[15:8]
+ *     5      -> ch0_wcnt[7:0]
+ *     6      -> ch0_wcnt[15:8]
+ *     7      -> ch1_wcnt[7:0]
+ *     8      -> ch1_wcnt[15:8]
+ *     9      -> ch2_wcnt[7:0]
+ *     10     -> ch2_wcnt[15:8]
+ *     11     -> ch3_wcnt[7:0]
+ *     12     -> ch3_wcnt[15:8]
+ *     13-20  -> event_history[0..7]  (3-bit channel code per entry, upper 5 bits 0)
+ *     21     -> hist_wptr (next write slot, 0-7)
+ *     other  -> reads back 0x00
  * ===========================================================================
  */
-module tt_um_sreemathesh_k_wake_ctrl (
-    input  wire [7:0] ui_in,    // Dedicated inputs
-    output wire [7:0] uo_out,   // Dedicated outputs
-    input  wire [7:0] uio_in,   // IOs: Input path
-    output wire [7:0] uio_out,  // IOs: Output path
-    output wire [7:0] uio_oe,   // IOs: Enable path (active high: 0=input, 1=output)
-    input  wire        ena,     // goes high when design is powered/enabled
-    input  wire        clk,     // clock
-    input  wire        rst_n    // reset_n - low to reset
+module tt_um_wake_ctrl (
+    input  wire [7:0] ui_in,
+    output wire [7:0] uo_out,
+    input  wire [7:0] uio_in,
+    output wire [7:0] uio_out,
+    output wire [7:0] uio_oe,
+    input  wire        ena,
+    input  wire        clk,
+    input  wire        rst_n
 );
 
-    // ---- Input mapping ------------------------------------------------
     wire [3:0] thresh_in = ui_in[3:0];
     wire [3:0] ch_en     = ui_in[7:4];
     wire       mode_and  = uio_in[0];
-    wire [2:0] reg_sel   = uio_in[3:1];
+    wire [4:0] reg_sel   = uio_in[5:1];
 
-    // ---- Core instance --------------------------------------------------
     wire        wake_out;
     wire [3:0]  evt_flags;
     wire [2:0]  priority_ch;
     wire [15:0] wake_count;
     wire [15:0] false_wake_cnt;
+    wire [15:0] ch0_wcnt, ch1_wcnt, ch2_wcnt, ch3_wcnt;
+    wire [23:0] hist_flat;
+    wire [2:0]  hist_wptr;
 
     wake_ctrl #(
         .N  (4),
@@ -256,32 +294,46 @@ module tt_um_sreemathesh_k_wake_ctrl (
         .evt_flags      (evt_flags),
         .priority_ch    (priority_ch),
         .wake_count     (wake_count),
-        .false_wake_cnt (false_wake_cnt)
+        .false_wake_cnt (false_wake_cnt),
+        .ch0_wcnt       (ch0_wcnt),
+        .ch1_wcnt       (ch1_wcnt),
+        .ch2_wcnt       (ch2_wcnt),
+        .ch3_wcnt       (ch3_wcnt),
+        .hist_flat      (hist_flat),
+        .hist_wptr      (hist_wptr)
     );
 
-    // ---- Output readback mux --------------------------------------------
     reg [7:0] out_mux;
     always @(*) begin
         case (reg_sel)
-            3'd0:    out_mux = {wake_out, priority_ch, evt_flags};
-            3'd1:    out_mux = wake_count[7:0];
-            3'd2:    out_mux = wake_count[15:8];
-            3'd3:    out_mux = false_wake_cnt[7:0];
-            3'd4:    out_mux = false_wake_cnt[15:8];
+            5'd0:  out_mux = {wake_out, priority_ch, evt_flags};
+            5'd1:  out_mux = wake_count[7:0];
+            5'd2:  out_mux = wake_count[15:8];
+            5'd3:  out_mux = false_wake_cnt[7:0];
+            5'd4:  out_mux = false_wake_cnt[15:8];
+            5'd5:  out_mux = ch0_wcnt[7:0];
+            5'd6:  out_mux = ch0_wcnt[15:8];
+            5'd7:  out_mux = ch1_wcnt[7:0];
+            5'd8:  out_mux = ch1_wcnt[15:8];
+            5'd9:  out_mux = ch2_wcnt[7:0];
+            5'd10: out_mux = ch2_wcnt[15:8];
+            5'd11: out_mux = ch3_wcnt[7:0];
+            5'd12: out_mux = ch3_wcnt[15:8];
+            5'd13: out_mux = {5'b0, hist_flat[2:0]};
+            5'd14: out_mux = {5'b0, hist_flat[5:3]};
+            5'd15: out_mux = {5'b0, hist_flat[8:6]};
+            5'd16: out_mux = {5'b0, hist_flat[11:9]};
+            5'd17: out_mux = {5'b0, hist_flat[14:12]};
+            5'd18: out_mux = {5'b0, hist_flat[17:15]};
+            5'd19: out_mux = {5'b0, hist_flat[20:18]};
+            5'd20: out_mux = {5'b0, hist_flat[23:21]};
+            5'd21: out_mux = {5'b0, hist_wptr};
             default: out_mux = 8'h00;
         endcase
     end
 
     assign uo_out  = out_mux;
-
-    // ena and uio_in[7:4] are intentionally unused by this design's
-    // functionality. Instead of sinking them into a standalone wire that
-    // nothing reads (which trips a separate "bit not read" lint check),
-    // fold them directly into an already-driven output port. The AND with
-    // 1'b0 forces the contribution to always be zero, so uio_out's value
-    // is unchanged -- but the bit is now genuinely "read" by a live output,
-    // so both the "unused input" and "bit not read" warnings are resolved.
-    assign uio_out = {7'b0, (ena & (&uio_in[7:4]) & 1'b0)};
+    assign uio_out = {7'b0, (ena & (&uio_in[7:6]) & 1'b0)};
     assign uio_oe  = 8'h00;
 
 endmodule
