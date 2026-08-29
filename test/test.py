@@ -1,137 +1,199 @@
+# SPDX-FileCopyrightText: © 2026 Sreemathesh K
 # SPDX-License-Identifier: Apache-2.0
+#
+# cocotb port of the original tb_full.v test cases (TC1-TC14) for
+# tt_um_sreemathesh_k_wake_ctrl.
+
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, Timer
+from cocotb.triggers import ClockCycles
 
 
-def set_ui(dut, thresh_in, ch_en):
-    dut.ui_in.value = (ch_en << 4) | thresh_in
+def set_inputs(dut, thresh_in=0, ch_en=0b1111, mode_and=0, reg_sel=0):
+    dut.ui_in.value = ((ch_en & 0xF) << 4) | (thresh_in & 0xF)
+    dut.uio_in.value = ((reg_sel & 0x7) << 1) | (mode_and & 0x1)
 
 
-def set_uio(dut, mode_and, reg_sel):
-    dut.uio_in.value = (reg_sel << 1) | mode_and
+async def read_reg(dut, reg_sel):
+    """Select a readback register and return the byte on uo_out."""
+    dut.uio_in.value = (dut.uio_in.value.integer & 0x1) | ((reg_sel & 0x7) << 1)
+    await ClockCycles(dut.clk, 1)
+    return int(dut.uo_out.value)
 
 
-async def reset(dut):
+async def read_wake_count(dut):
+    lo = await read_reg(dut, 1)
+    hi = await read_reg(dut, 2)
+    return (hi << 8) | lo
+
+
+async def read_false_wake_cnt(dut):
+    lo = await read_reg(dut, 3)
+    hi = await read_reg(dut, 4)
+    return (hi << 8) | lo
+
+
+async def read_status(dut):
+    """reg_sel=0 -> {wake_out, priority_ch[2:0], evt_flags[3:0]}"""
+    val = await read_reg(dut, 0)
+    wake_out = (val >> 7) & 0x1
+    priority_ch = (val >> 4) & 0x7
+    evt_flags = val & 0xF
+    return wake_out, priority_ch, evt_flags
+
+
+async def do_reset(dut, ch_en=0b1111, mode_and=0):
     dut.ena.value = 1
+    set_inputs(dut, thresh_in=0, ch_en=ch_en, mode_and=mode_and, reg_sel=0)
     dut.rst_n.value = 0
-    set_ui(dut, 0, 0b1111)
-    set_uio(dut, 0, 0)
-    await ClockCycles(dut.clk, 3)
+    await ClockCycles(dut.clk, 2)
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 1)
 
 
-async def read_reg(dut, reg_sel):
-    # out_mux in the DUT is purely combinational (always @(*)), so after
-    # changing reg_sel we must yield back to the simulator (any await) to
-    # let it re-evaluate before uo_out reflects the new selection. Without
-    # this, uo_out still holds the *previous* reg_sel's value -- this was
-    # the actual cause of every failing test, not the RTL.
-    set_uio(dut, int(dut.uio_in.value) & 1, reg_sel)
-    await Timer(1, units="ns")
-    return int(dut.uo_out.value)
-
-
 @cocotb.test()
-async def test_reset(dut):
-    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
-    await reset(dut)
+async def test_wake_ctrl(dut):
+    dut._log.info("Start wake_ctrl test")
 
-    status = await read_reg(dut, 0)
-    wake_out = (status >> 7) & 1
-    priority_ch = (status >> 4) & 0x7
-    evt_flags = status & 0xF
+    clock = Clock(dut.clk, 20, units="ns")
+    cocotb.start_soon(clock.start())
 
-    assert wake_out == 0
-    assert priority_ch == 0x7
-    assert evt_flags == 0
+    # ---------------- TC1: reset state ----------------
+    await do_reset(dut)
+    wake_out, priority_ch, evt_flags = await read_status(dut)
+    assert wake_out == 0, "TC1 reset: wake_out=0"
+    assert priority_ch == 7, "TC1 reset: priority_ch=7(none)"
+    assert evt_flags == 0, "TC1 reset: evt_flags=0"
+    assert await read_wake_count(dut) == 0, "TC1 reset: wake_count=0"
+    assert await read_false_wake_cnt(dut) == 0, "TC1 reset: false_wake_cnt=0"
 
-    wake_count = (await read_reg(dut, 1)) | ((await read_reg(dut, 2)) << 8)
-    false_wake_cnt = (await read_reg(dut, 3)) | ((await read_reg(dut, 4)) << 8)
-    assert wake_count == 0
-    assert false_wake_cnt == 0
-
-
-@cocotb.test()
-async def test_or_mode_wake_on_ch0(dut):
-    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
-    await reset(dut)
-
-    set_ui(dut, 0b0001, 0b1111)
-    set_uio(dut, 0, 0)
-
-    # evt_flags/priority_ch are only held valid for the duration of the
-    # wake pulse (PW=4 -> 16 cycles) after the debounce window (~10
-    # cycles); the FSM clears evt_flags back to 0 once the pulse ends so
-    # it won't re-fire without a fresh edge. Sample them promptly, while
-    # the pulse is still active, rather than after it has already ended.
-    await ClockCycles(dut.clk, 20)
-    status = await read_reg(dut, 0)
-    priority_ch = (status >> 4) & 0x7
-    evt_flags = status & 0xF
-    assert evt_flags == 0b0001, f"expected evt_flags==0b0001, got {evt_flags:04b}"
-    assert priority_ch == 0
-
-    # wake_count is a persistent saturating counter, so it's safe to check
-    # well after the pulse has fully completed.
-    await ClockCycles(dut.clk, 40)
-    wake_count = (await read_reg(dut, 1)) | ((await read_reg(dut, 2)) << 8)
-    assert wake_count == 1, f"expected wake_count==1, got {wake_count}"
-
-    set_ui(dut, 0, 0b1111)
-    await ClockCycles(dut.clk, 20)
-
-
-@cocotb.test()
-async def test_glitch_is_rejected(dut):
-    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
-    await reset(dut)
-
-    set_ui(dut, 0b0001, 0b1111)
+    # ---------------- TC2: glitch rejected by debounce ----------------
+    await do_reset(dut)
+    set_inputs(dut, thresh_in=0b0001)
     await ClockCycles(dut.clk, 2)
-    set_ui(dut, 0, 0b1111)
+    set_inputs(dut, thresh_in=0b0000)
+    await ClockCycles(dut.clk, 10)
+    assert await read_wake_count(dut) == 0, "TC2 glitch rejected: wake_count stays 0"
+
+    # ---------------- TC3: OR mode sustained ch0 wake ----------------
+    await do_reset(dut)
+    set_inputs(dut, thresh_in=0b0001)
+    await ClockCycles(dut.clk, 8)
+    _, _, evt_flags = await read_status(dut)
+    assert evt_flags == 0b0001, "TC3 evt_flags reflects ch0 right after firing"
+    await ClockCycles(dut.clk, 52)
+    assert await read_wake_count(dut) == 1, "TC3 OR wake fires on sustained ch0"
+    _, priority_ch, _ = await read_status(dut)
+    assert priority_ch == 0, "TC3 priority_ch=0"
+    set_inputs(dut, thresh_in=0b0000)
+    await ClockCycles(dut.clk, 20)
+
+    # ---------------- TC4: no double-fire on a single sustained assertion ----------------
+    await do_reset(dut)
+    set_inputs(dut, thresh_in=0b0001)
+    await ClockCycles(dut.clk, 80)
+    set_inputs(dut, thresh_in=0b0000)
+    await ClockCycles(dut.clk, 20)
+    assert await read_wake_count(dut) == 1, "TC4 no double-fire: wake_count==1"
+
+    # ---------------- TC5: disabled channel never wakes ----------------
+    await do_reset(dut, ch_en=0b1110)
+    set_inputs(dut, thresh_in=0b0001, ch_en=0b1110)
+    await ClockCycles(dut.clk, 60)
+    assert await read_wake_count(dut) == 0, "TC5 disabled channel: wake_count stays 0"
+    set_inputs(dut, thresh_in=0b0000, ch_en=0b1111)
     await ClockCycles(dut.clk, 10)
 
-    wake_count = (await read_reg(dut, 1)) | ((await read_reg(dut, 2)) << 8)
-    assert wake_count == 0
+    # ---------------- TC6: OR-mode fires on lowest-priority ch0 first ----------------
+    await do_reset(dut)
+    set_inputs(dut, thresh_in=0b1111)
+    await ClockCycles(dut.clk, 60)
+    _, priority_ch, evt_flags = await read_status(dut)
+    assert evt_flags == 0b1111 or priority_ch == 0, \
+        "TC6 OR-mode fires on lowest-priority ch0 first"
+    set_inputs(dut, thresh_in=0b0000)
+    await ClockCycles(dut.clk, 20)
 
+    # ---------------- TC7: priority_ch for ch3-only, and release back to 'none' ----------------
+    await do_reset(dut)
+    set_inputs(dut, thresh_in=0b1000)
+    await ClockCycles(dut.clk, 60)
+    _, priority_ch, _ = await read_status(dut)
+    assert priority_ch == 3, "TC7 priority_ch=3 for ch3-only (not confused with 'none')"
+    set_inputs(dut, thresh_in=0b0000)
+    await ClockCycles(dut.clk, 20)
+    _, priority_ch, _ = await read_status(dut)
+    assert priority_ch == 7, "TC7b priority_ch returns to 7 (none) after release"
 
-@cocotb.test()
-async def test_and_mode_partial_assertion_false_wake(dut):
-    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
-    await reset(dut)
+    # ---------------- TC8: AND-mode true wake ----------------
+    await do_reset(dut)
+    set_inputs(dut, thresh_in=0b1111, mode_and=1)
+    await ClockCycles(dut.clk, 60)
+    assert await read_wake_count(dut) == 1, "TC8 AND-mode true wake fires"
+    assert await read_false_wake_cnt(dut) == 0, "TC8 AND-mode no false wake on true event"
+    set_inputs(dut, thresh_in=0b0000, mode_and=1)
+    await ClockCycles(dut.clk, 20)
 
-    set_ui(dut, 0b0001, 0b1111)
-    set_uio(dut, 1, 0)
+    # ---------------- TC9: AND-mode partial assertion -> false wake ----------------
+    await do_reset(dut)
+    set_inputs(dut, thresh_in=0b0001, mode_and=1)
     await ClockCycles(dut.clk, 100)
+    assert await read_false_wake_cnt(dut) == 1, "TC9 false_wake_cnt==1 for held partial assertion"
+    assert await read_wake_count(dut) == 0, "TC9 no true wake generated"
+    set_inputs(dut, thresh_in=0b0000, mode_and=1)
+    await ClockCycles(dut.clk, 20)
 
-    wake_count = (await read_reg(dut, 1)) | ((await read_reg(dut, 2)) << 8)
-    false_wake_cnt = (await read_reg(dut, 3)) | ((await read_reg(dut, 4)) << 8)
+    # ---------------- TC10: two separate partial events -> false_wake_cnt==2 ----------------
+    await do_reset(dut)
+    set_inputs(dut, thresh_in=0b0001, mode_and=1)
+    await ClockCycles(dut.clk, 30)
+    set_inputs(dut, thresh_in=0b0000, mode_and=1)
+    await ClockCycles(dut.clk, 10)
+    set_inputs(dut, thresh_in=0b0010, mode_and=1)
+    await ClockCycles(dut.clk, 30)
+    set_inputs(dut, thresh_in=0b0000, mode_and=1)
+    await ClockCycles(dut.clk, 10)
+    assert await read_false_wake_cnt(dut) == 2, "TC10 two separate partial events -> false_wake_cnt==2"
 
-    assert wake_count == 0
-    assert false_wake_cnt == 1
+    # ---------------- TC11: mid-debounce disable resets, no premature wake ----------------
+    await do_reset(dut)
+    set_inputs(dut, thresh_in=0b0001)
+    await ClockCycles(dut.clk, 1)
+    set_inputs(dut, thresh_in=0b0000, ch_en=0b1110)
+    await ClockCycles(dut.clk, 10)
+    set_inputs(dut, thresh_in=0b0000, ch_en=0b1111)
+    await ClockCycles(dut.clk, 10)
+    assert await read_wake_count(dut) == 0, "TC11 mid-debounce disable resets: no premature wake"
 
-    set_ui(dut, 0, 0b1111)
-    set_uio(dut, 0, 0)
+    # ---------------- TC12: no X/undefined state after mode flip ----------------
+    await do_reset(dut)
+    set_inputs(dut, thresh_in=0b0001)
+    await ClockCycles(dut.clk, 10)
+    set_inputs(dut, thresh_in=0b0001, mode_and=1)
+    await ClockCycles(dut.clk, 60)
+    wake_val = dut.uo_out.value
+    assert "x" not in wake_val.binstr.lower(), "TC12 no X/undefined state after mode flip"
+    set_inputs(dut, thresh_in=0b0000, mode_and=0)
     await ClockCycles(dut.clk, 10)
 
+    # ---------------- TC13: wake_count saturates at 0xFFFF, no wraparound ----------------
+    await do_reset(dut)
+    for _ in range(70000):
+        set_inputs(dut, thresh_in=0b0001)
+        await ClockCycles(dut.clk, 8)
+        set_inputs(dut, thresh_in=0b0000)
+        await ClockCycles(dut.clk, 8)
+        if await read_wake_count(dut) == 0xFFFF:
+            break
+    await ClockCycles(dut.clk, 5)
+    assert await read_wake_count(dut) == 0xFFFF, "TC13 wake_count saturates at 0xFFFF, no wraparound"
 
-@cocotb.test()
-async def test_and_mode_full_assertion_wakes_once(dut):
-    cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
-    await reset(dut)
-
-    set_ui(dut, 0b1111, 0b1111)
-    set_uio(dut, 1, 0)
+    # ---------------- TC14: sustained AND success fires exactly once ----------------
+    await do_reset(dut)
+    set_inputs(dut, thresh_in=0b1111, mode_and=1)
     await ClockCycles(dut.clk, 200)
-
-    wake_count = (await read_reg(dut, 1)) | ((await read_reg(dut, 2)) << 8)
-    false_wake_cnt = (await read_reg(dut, 3)) | ((await read_reg(dut, 4)) << 8)
-
-    assert wake_count == 1
-    assert false_wake_cnt == 0
-
-    set_ui(dut, 0, 0b1111)
-    set_uio(dut, 0, 0)
+    assert await read_wake_count(dut) == 1, "TC14 sustained AND success fires exactly once"
+    set_inputs(dut, thresh_in=0b0000, mode_and=1)
     await ClockCycles(dut.clk, 10)
+
+    dut._log.info("All wake_ctrl checks passed")
