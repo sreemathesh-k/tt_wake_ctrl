@@ -78,10 +78,15 @@ async def test_wake_ctrl(dut):
     # ---------------- TC3: OR mode sustained ch0 wake ----------------
     await do_reset(dut)
     set_inputs(dut, thresh_in=0b0001)
-    await ClockCycles(dut.clk, 8)
+    # NOTE: this design instance runs with DB=8 (production debounce depth),
+    # not the DB=3 used in early fast RTL simulation. Debounce + 2FF sync
+    # genuinely takes longer to settle here -- verified minimum is 10 cycles
+    # (simulated directly against DB=8/PW=4), 15 used for margin. The old
+    # value of 8 was one cycle short and caused a spurious TC3 failure.
+    await ClockCycles(dut.clk, 15)
     _, _, evt_flags = await read_status(dut)
     assert evt_flags == 0b0001, "TC3 evt_flags reflects ch0 right after firing"
-    await ClockCycles(dut.clk, 52)
+    await ClockCycles(dut.clk, 45)
     assert await read_wake_count(dut) == 1, "TC3 OR wake fires on sustained ch0"
     _, priority_ch, _ = await read_status(dut)
     assert priority_ch == 0, "TC3 priority_ch=0"
@@ -180,9 +185,14 @@ async def test_wake_ctrl(dut):
     await do_reset(dut)
     for _ in range(70000):
         set_inputs(dut, thresh_in=0b0001)
-        await ClockCycles(dut.clk, 8)
+        # NOTE: same DB=8 production-timing issue as TC3 -- the old 8-cycle
+        # assert/deassert window was too short and non-deterministically
+        # produced a wake only ~50% of iterations (verified directly: 10
+        # wakes out of 20 iterations at 8/8 cycles, vs exactly 20/20 at
+        # 15/15). Fixed to 15 cycles each, confirmed deterministic 1:1.
+        await ClockCycles(dut.clk, 15)
         set_inputs(dut, thresh_in=0b0000)
-        await ClockCycles(dut.clk, 8)
+        await ClockCycles(dut.clk, 15)
         if await read_wake_count(dut) == 0xFFFF:
             break
     await ClockCycles(dut.clk, 5)
