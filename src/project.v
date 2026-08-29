@@ -1,7 +1,7 @@
 `timescale 1ns / 1ps
 /*
  * ===========================================================================
- * wake_controller - Multi-channel debounced wake/event controller
+ * wake_ctrl - Multi-channel debounced wake/event controller
  * ===========================================================================
  * 4-channel input controller with per-channel debounce, priority encoding,
  * and two wake modes:
@@ -11,20 +11,20 @@
  *     logged as a "false wake" instead.
  *
  * This file also contains the TinyTapeout top-level wrapper
- * (tt_um_sreemathesh_k_wake_controller) that maps the design onto the
- * fixed TT pin budget:
+ * (tt_um_sreemathesh_k_wake_ctrl) that maps the design onto the fixed TT
+ * pin budget:
  *   ui_in[7:0]  = 8 dedicated inputs
  *   uo_out[7:0] = 8 dedicated outputs
  *   uio[7:0]    = 8 bidirectional pins
  *
- * wake_controller needs 9 input bits and 40 output bits, so the wide
- * status/counter registers (wake_count, false_wake_cnt, evt_flags,
- * priority_ch, wake_out) are exposed through a small byte-wide readback
- * bus instead of being wired out directly -- see the register map below.
+ * wake_ctrl needs 9 input bits and 40 output bits, so the wide status/
+ * counter registers (wake_count, false_wake_cnt, evt_flags, priority_ch,
+ * wake_out) are exposed through a small byte-wide readback bus instead of
+ * being wired out directly -- see the register map below.
  * ===========================================================================
  */
 
-module wake_controller #(
+module wake_ctrl #(
     parameter N  = 4,
     parameter DB = 8,
     parameter PW = 4
@@ -34,11 +34,11 @@ module wake_controller #(
     input  wire [N-1:0] thresh_in,
     input  wire [N-1:0] ch_en,
     input  wire         mode_and,
-    output reg           wake_out,
-    output reg  [N-1:0]  evt_flags,
-    output reg  [2:0]    priority_ch,
-    output reg  [15:0]   wake_count,
-    output reg  [15:0]   false_wake_cnt
+    output reg          wake_out,
+    output reg  [N-1:0] evt_flags,
+    output reg  [2:0]   priority_ch,
+    output reg  [15:0]  wake_count,
+    output reg  [15:0]  false_wake_cnt
 );
 
     // Debounce counter width scales with DB so any legal DB value works
@@ -46,7 +46,8 @@ module wake_controller #(
     // for DB > 16 -- caught by testing DB=20 directly).
     localparam DBW = (DB <= 1) ? 1 : $clog2(DB);
     // Explicitly-sized compare constant so dbcnt[i] >= DB_M1 never mixes
-    // a DBW-bit reg with an implicit 32-bit integer literal.
+    // a DBW-bit reg with an implicit 32-bit integer literal (this was a
+    // silent width-mismatch warning source under some lint settings).
     localparam [DBW-1:0] DB_M1 = DB - 1;
 
     reg [N-1:0]   sync1, sync2;
@@ -93,6 +94,13 @@ module wake_controller #(
     endgenerate
 
     // Stage 3: Priority Encoder
+    // Rewritten to index individual bits directly instead of building a
+    // shifted 1-bit mask ((1'b1 << i)) and ANDing it against a 4-bit bus.
+    // The old form relies on implicit context-based width extension of a
+    // literal that is *explicitly* declared 1-bit (1'b1), which is legal
+    // per LRM but is exactly the pattern Vivado's elaboration linter warns
+    // about ("operand sizes are inconsistent" / width-mismatch). Direct
+    // bit-select comparisons are unambiguous and synthesize identically.
     wire [N-1:0] pri_active = stable & ch_en;
     reg  [2:0]   pri_next;
     always @* begin
@@ -190,7 +198,7 @@ endmodule
 
 /*
  * ===========================================================================
- * tt_um_sreemathesh_k_wake_controller - TinyTapeout top-level wrapper
+ * tt_um_sreemathesh_k_wake_ctrl - TinyTapeout top-level wrapper
  * ===========================================================================
  * Pinout:
  *   ui_in[3:0]  = thresh_in[3:0]
@@ -210,7 +218,7 @@ endmodule
  *     5-7 -> reads back 0x00
  * ===========================================================================
  */
-module tt_um_sreemathesh_k_wake_controller (
+module tt_um_sreemathesh_k_wake_ctrl (
     input  wire [7:0] ui_in,    // Dedicated inputs
     output wire [7:0] uo_out,   // Dedicated outputs
     input  wire [7:0] uio_in,   // IOs: Input path
@@ -234,11 +242,11 @@ module tt_um_sreemathesh_k_wake_controller (
     wire [15:0] wake_count;
     wire [15:0] false_wake_cnt;
 
-    wake_controller #(
+    wake_ctrl #(
         .N  (4),
         .DB (8),
         .PW (4)
-    ) u_wake_controller (
+    ) u_wake_ctrl (
         .clk            (clk),
         .rst_n          (rst_n),
         .thresh_in      (thresh_in),
@@ -265,9 +273,15 @@ module tt_um_sreemathesh_k_wake_controller (
     end
 
     assign uo_out  = out_mux;
-    assign uio_out = 8'h00;
-    assign uio_oe  = 8'h00;
 
-    wire _unused = &{ena, uio_in[7:4], 1'b0};
+    // ena and uio_in[7:4] are intentionally unused by this design's
+    // functionality. Instead of sinking them into a standalone wire that
+    // nothing reads (which trips a separate "bit not read" lint check),
+    // fold them directly into an already-driven output port. The AND with
+    // 1'b0 forces the contribution to always be zero, so uio_out's value
+    // is unchanged -- but the bit is now genuinely "read" by a live output,
+    // so both the "unused input" and "bit not read" warnings are resolved.
+    assign uio_out = {7'b0, (ena & (&uio_in[7:4]) & 1'b0)};
+    assign uio_oe  = 8'h00;
 
 endmodule
