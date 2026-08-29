@@ -1,43 +1,50 @@
-# TinyTapeout project information
+# Tiny Tapeout project information
 project:
-  title:        "Wake Controller"
+  title:        "Multi-Channel Debounced Wake Controller"
   author:       "Sreemathesh K"
   discord:      ""
-  description:  "Debounced 4-channel wake/event controller with selectable OR/AND wake logic, priority encoding, a saturating wake counter, and a false-wake counter, read back through a byte-wide register bus."
+  description:  "4-channel debounced wake/event controller with priority encoding, OR/AND wake modes, and byte-wide status readback"
   language:     "Verilog"
-  clock_hz:     50000000
-  tiles:        "1x1"
-  top_module:   "tt_um_sreemathesh_k_wake_controller"
+  clock_hz:     10000000              # 10 MHz — matches DB=8 debounce depth well; change if you target a different clock
 
+  # How many tiles your design occupies (1x1, 1x2, 2x2, etc). Leave 1x1 unless synthesis says you need more.
+  tiles:        "1x1"
+
+  # Top module name must start with tt_um_ and be globally unique (username baked in).
+  top_module:   "tt_um_sreemathesh_k_wake_ctrl"
+
+  # List of source files - relative to the src folder.
   source_files:
     - "project.v"
 
+# Pinout - describe what each dedicated/bidirectional pin does.
 pinout:
-  ui[0]: "thresh_in[0]"
-  ui[1]: "thresh_in[1]"
-  ui[2]: "thresh_in[2]"
-  ui[3]: "thresh_in[3]"
-  ui[4]: "ch_en[0]"
-  ui[5]: "ch_en[1]"
-  ui[6]: "ch_en[2]"
-  ui[7]: "ch_en[3]"
+  ui[0]: "thresh_in[0] - channel 0 raw threshold input"
+  ui[1]: "thresh_in[1] - channel 1 raw threshold input"
+  ui[2]: "thresh_in[2] - channel 2 raw threshold input"
+  ui[3]: "thresh_in[3] - channel 3 raw threshold input"
+  ui[4]: "ch_en[0] - enable channel 0"
+  ui[5]: "ch_en[1] - enable channel 1"
+  ui[6]: "ch_en[2] - enable channel 2"
+  ui[7]: "ch_en[3] - enable channel 3"
 
-  uo[0]: "reg_sel=0: evt_flags[0] | reg1/3: data[0] | reg2/4: data[8]"
-  uo[1]: "reg_sel=0: evt_flags[1] | reg1/3: data[1] | reg2/4: data[9]"
-  uo[2]: "reg_sel=0: evt_flags[2] | reg1/3: data[2] | reg2/4: data[10]"
-  uo[3]: "reg_sel=0: evt_flags[3] | reg1/3: data[3] | reg2/4: data[11]"
-  uo[4]: "reg_sel=0: priority_ch[0] | reg1/3: data[4] | reg2/4: data[12]"
-  uo[5]: "reg_sel=0: priority_ch[1] | reg1/3: data[5] | reg2/4: data[13]"
-  uo[6]: "reg_sel=0: priority_ch[2] | reg1/3: data[6] | reg2/4: data[14]"
-  uo[7]: "reg_sel=0: wake_out | reg1/3: data[7] | reg2/4: data[15]"
+  uo[0]: "readback bus bit 0 (meaning depends on reg_sel)"
+  uo[1]: "readback bus bit 1"
+  uo[2]: "readback bus bit 2"
+  uo[3]: "readback bus bit 3"
+  uo[4]: "readback bus bit 4"
+  uo[5]: "readback bus bit 5"
+  uo[6]: "readback bus bit 6"
+  uo[7]: "readback bus bit 7"
 
-  uio[0]: "mode_and"
-  uio[1]: "reg_sel[0]"
-  uio[2]: "reg_sel[1]"
-  uio[3]: "reg_sel[2]"
+  uio[0]: "mode_and - 0: OR wake mode, 1: AND wake mode"
+  uio[1]: "reg_sel[0] - readback register select"
+  uio[2]: "reg_sel[1] - readback register select"
+  uio[3]: "reg_sel[2] - readback register select"
   uio[4]: ""
   uio[5]: ""
   uio[6]: ""
   uio[7]: ""
 
+# Do not change!
 yaml_version: 6
