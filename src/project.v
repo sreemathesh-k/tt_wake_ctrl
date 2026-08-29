@@ -1,21 +1,18 @@
 `timescale 1ns / 1ps
 /*
- * wake_ctrl_enhanced - adds two read-only diagnostic features on top of the
- * already-verified base design, using spare tile area rather than padding:
+ * wake_controller (enhanced) - adds two read-only diagnostic features on top
+ * of the already-verified base design, using spare tile area:
  *
  *   1. Per-channel wake counters (ch0_wcnt..ch3_wcnt): how many times each
- *      individual sensor channel has contributed to a genuine wake, so you
- *      can tell which sensor is actually driving activity.
+ *      individual sensor channel has contributed to a genuine wake.
  *   2. 8-entry event history log (hist_flat, hist_wptr): a circular buffer
- *      recording which channel (by priority_ch) caused each of the last 8
- *      wakes, so you can reconstruct "what happened" after the fact instead
- *      of only seeing a live snapshot.
+ *      recording which channel caused each of the last 8 wakes.
  *
  * Both are purely additive: no change to thresh_in/ch_en/mode_and behavior,
  * no new input pins required. All new ports are outputs, read-only.
  */
 
-module wake_ctrl #(
+module wake_controller #(
     parameter N  = 4,
     parameter DB = 8,
     parameter PW = 4
@@ -180,10 +177,7 @@ module wake_ctrl #(
         end
     end
 
-    // Stage 7 (new): Per-channel saturating wake counters. On each wake
-    // rising edge, every channel bit set in evt_flags at that instant gets
-    // its own counter incremented (evt_flags is still holding the latched
-    // cause of the wake at this point -- it only clears when the pulse ends).
+    // Stage 7 (new): Per-channel saturating wake counters.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             ch0_wcnt <= 16'd0;
@@ -198,9 +192,7 @@ module wake_ctrl #(
         end
     end
 
-    // Stage 8 (new): 8-entry circular event history log. Records
-    // priority_ch (the highest-priority contributing channel, or 7 if
-    // somehow none -- shouldn't happen on a real wake) at each wake event.
+    // Stage 8 (new): 8-entry circular event history log.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             hist_flat <= 24'd0;
@@ -216,19 +208,20 @@ module wake_ctrl #(
                 3'd6: hist_flat[20:18] <= priority_ch;
                 3'd7: hist_flat[23:21] <= priority_ch;
             endcase
-            hist_wptr <= hist_wptr + 1'b1; // wraps naturally, 3'd7+1=3'd0
+            hist_wptr <= hist_wptr + 1'b1;
         end
     end
 
 endmodule
+
+
 /*
  * ===========================================================================
- * tt_um_wake_ctrl - TinyTapeout top-level wrapper (enhanced)
+ * tt_um_sreemathesh_k_wake_ctrl - TinyTapeout top-level wrapper (enhanced)
  * ===========================================================================
- * Pin mapping is UNCHANGED from the base design -- no existing behavior or
- * pin meaning is altered. Only the reg_sel readback bus is widened (3->5
- * bits) to expose the new diagnostic data, using uio_in bits that were
- * previously unused.
+ * Pin mapping is UNCHANGED from the base design.
+ * Only the reg_sel readback bus is widened (3->5 bits) using previously
+ * unused uio_in bits, to expose the new diagnostic data.
  *
  *   ui_in[3:0]  = thresh_in[3:0]        (unchanged)
  *   ui_in[7:4]  = ch_en[3:0]            (unchanged)
@@ -250,12 +243,12 @@ endmodule
  *     10     -> ch2_wcnt[15:8]
  *     11     -> ch3_wcnt[7:0]
  *     12     -> ch3_wcnt[15:8]
- *     13-20  -> event_history[0..7]  (3-bit channel code per entry, upper 5 bits 0)
+ *     13-20  -> event_history[0..7]  (3-bit channel code per entry)
  *     21     -> hist_wptr (next write slot, 0-7)
  *     other  -> reads back 0x00
  * ===========================================================================
  */
-module tt_um_wake_ctrl (
+module tt_um_sreemathesh_k_wake_ctrl (
     input  wire [7:0] ui_in,
     output wire [7:0] uo_out,
     input  wire [7:0] uio_in,
@@ -280,11 +273,11 @@ module tt_um_wake_ctrl (
     wire [23:0] hist_flat;
     wire [2:0]  hist_wptr;
 
-    wake_ctrl #(
+    wake_controller #(
         .N  (4),
         .DB (8),
         .PW (4)
-    ) u_wake_ctrl (
+    ) u_wake_controller (
         .clk            (clk),
         .rst_n          (rst_n),
         .thresh_in      (thresh_in),
